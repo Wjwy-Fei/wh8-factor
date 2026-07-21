@@ -9,16 +9,17 @@
 
 用法:
     python3 factor_wh8.py <输入.txt> [-o 输出.txt] [-p 前缀字母] \
-        [--min-count N] [--min-save N] [--reuse-from 已精简文件.txt]
+        [--min-count N] [--min-save N] [--reuse-from 已精简文件.txt ...]
 
 默认输出: 输入文件名 + "_精简.txt",与输入同目录。
 默认前缀: A (输出别名形如 AJ_A1, AJ_A2, ...)。
 
---reuse-from: 传入另一个已经瘦身过的文件(如 A文件_精简.txt)。本次提取出的
-公共定义,只要展开到最底层条件项后与该文件里某个已有定义完全相同,就不再
-重新定义,直接复用那个文件里的别名。用于两个文件分开瘦身、但存在相同重复
-定义的场景 —— 避免两份精简文件里出现内容相同、名字却不同的定义。
-使用该文件时,WH8 里必须把 --reuse-from 指向的文件粘贴在本文件之前。
+--reuse-from: 传入一个或多个已经瘦身过的文件(如 A文件_精简.txt),可重复传参
+复用多个文件。本次提取出的公共定义,只要展开到最底层条件项后与这些文件里
+某个已有定义完全相同,就不再重新定义,直接复用那个文件里的别名。用于多个
+文件分开瘦身、但存在相同重复定义的场景 —— 避免精简文件里出现内容相同、
+名字却不同的定义。使用该文件时,WH8 里必须把 --reuse-from 指向的文件都
+粘贴在本文件之前。
 """
 import argparse
 import collections
@@ -237,7 +238,8 @@ def main():
     ap.add_argument('-p', '--prefix', default='A', help='别名前缀字母,默认 A (生成 AJ_A1, AJ_A2 ...)')
     ap.add_argument('--min-count', type=int, default=4, help='片段至少重复几次才提取,默认 4')
     ap.add_argument('--min-save', type=int, default=80, help='提取净节省字符数门槛,默认 80')
-    ap.add_argument('--reuse-from', default=None, help='复用另一个已精简文件里的公共定义,内容相同则不重复定义')
+    ap.add_argument('--reuse-from', action='append', default=[],
+                     help='复用另一个已精简文件里的公共定义,内容相同则不重复定义;可重复传参复用多个文件')
     args = ap.parse_args()
 
     out = args.out or re.sub(r'\.txt$', '_精简.txt', args.input)
@@ -253,7 +255,8 @@ def main():
 
     reuse_map, renamed = {}, {}
     if args.reuse_from:
-        reuse_map = load_reuse_map(args.reuse_from)
+        for path in args.reuse_from:
+            reuse_map.update(load_reuse_map(path))
         defs, expand_map, renamed = apply_reuse(defs, expand_map, lines, order, reuse_map)
 
     verify_map = dict(reuse_map)
@@ -276,7 +279,7 @@ def main():
     print('信号行数: %d' % len(order))
     print('提取公共定义: %d 个 (前缀 AJ_%s)' % (len(defs), args.prefix))
     if renamed:
-        print('复用 %s 中已有定义: %d 个 -> %s' % (args.reuse_from, len(renamed), sorted(set(renamed.values()))))
+        print('复用 %s 中已有定义: %d 个 -> %s' % (', '.join(args.reuse_from), len(renamed), sorted(set(renamed.values()))))
     if bad:
         print('!! 校验失败: 以下 %d 条展开还原后与原文不一致,已终止写出,请检查脚本或原文件格式: %s'
               % (len(bad), bad[:10]), file=sys.stderr)
