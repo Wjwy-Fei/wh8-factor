@@ -9,7 +9,7 @@
 
 用法:
     python3 factor_wh8.py <输入.txt> [-o 输出.txt] [-p 前缀字母] \
-        [--min-count N] [--min-save N] [--reuse-from 已精简文件.txt ...] [--or-format]
+        [--min-count N] [--min-save N] [--reuse-from 已精简文件.txt ...] [--or-format] [--merge-dup]
 
 默认输出: 输入文件名 + "_精简.txt",与输入同目录。
 默认前缀: A (输出别名形如 AJ_A1, AJ_A2, ...)。
@@ -24,6 +24,12 @@
 文件分开瘦身、但存在相同重复定义的场景 —— 避免精简文件里出现内容相同、
 名字却不同的定义。使用该文件时,WH8 里必须把 --reuse-from 指向的文件都
 粘贴在本文件之前。
+
+--merge-dup: 输入文件里如果出现同名但内容不同的信号行(通常是设计时同一个背景
+写了几个不同条件分支,却忘了把编号改掉),默认会直接报错退出并列出这些重名,
+避免静默用最后一条覆盖前面几条、导致条件丢失。加 --merge-dup 后会自动处理:
+取这些同名行共同的前缀条件,把各自不同的尾部条件用 (X || Y || ...) 合并,
+输出成一条信号。同名但内容完全相同的行始终会静默去重,不受此选项影响。
 """
 import argparse
 import collections
@@ -63,8 +69,9 @@ def split_terms(expr):
     return terms
 
 
-def load(path):
+def load(path, merge_dup=False):
     preamble, lines, order = [], {}, []
+    bodies = {}   # 信号名 -> [body, ...],用于发现同名重复
     text = open(path, encoding='utf-8-sig').read()
     for raw in text.splitlines():
         l = raw.strip()
@@ -76,10 +83,48 @@ def load(path):
             continue
         name, body = m.group(1), m.group(2)
         if SIGNAL_NAME_RE.match(name):
-            lines[name] = split_terms(body)
-            order.append(name)
+            if name not in bodies:
+                bodies[name] = []
+                order.append(name)
+            bodies[name].append(body)
         else:
             preamble.append(l)
+
+    # 同名但内容不同的重复信号行(常见于"同一背景下写了几个不同条件分支"却忘了改编号):
+    # 内容完全相同的重复直接去重;内容不同的必须显式处理,不能静默用最后一条覆盖前面的,
+    # 否则前面几条设计的条件会无声丢失。
+    conflicts = {n: bs for n, bs in bodies.items() if len(set(bs)) > 1}
+    if conflicts:
+        if not merge_dup:
+            print('错误: 发现 %d 个信号名重复且内容不同(可能是不同背景分支忘了改编号):' % len(conflicts),
+                  file=sys.stderr)
+            for n, bs in conflicts.items():
+                print('  %s 出现 %d 次,内容不同' % (n, len(bs)), file=sys.stderr)
+            print('如果这些是同一信号下应该合并的不同条件分支,加 --merge-dup 自动用 || 合并为一条;'
+                  '否则请先修正源文件里的信号名。', file=sys.stderr)
+            sys.exit(2)
+        for n, bs in conflicts.items():
+            term_lists = [split_terms(b) for b in bs]
+            minlen = min(len(t) for t in term_lists)
+            lcp = 0
+            while lcp < minlen and all(t[lcp] == term_lists[0][lcp] for t in term_lists):
+                lcp += 1
+            common = term_lists[0][:lcp]
+            alts = []
+            for t in term_lists:
+                rest = t[lcp:]
+                if not rest:
+                    print('错误: %s 的某个分支是另一分支的前缀子集,无法安全合并为 ||,请手动检查该信号'
+                          % n, file=sys.stderr)
+                    sys.exit(2)
+                alts.append(rest[0] if len(rest) == 1 else '(' + ' && '.join(rest) + ')')
+            merged = ' && '.join(common + ['(' + ' || '.join(alts) + ')'])
+            bodies[n] = [merged]
+            print('合并重复信号名 %s: %d 个分支 -> 公共前缀 %d 项 + OR 分支' % (n, len(bs), lcp),
+                  file=sys.stderr)
+
+    for name in order:
+        lines[name] = split_terms(bodies[name][0])
     return preamble, lines, order
 
 
@@ -355,6 +400,9 @@ def main():
     ap.add_argument('--or-group', action='store_true',
                      help='在 --or-format 基础上,用分配律把共享公共前缀的多条信号折叠成嵌套 OR '
                           '(A&&B&&C || A&&B&&D 合并成 A&&B&&(C||D)),隐含开启 --or-format')
+    ap.add_argument('--merge-dup', action='store_true',
+                     help='输入文件里同名但内容不同的信号行(如同一背景写了几个条件分支忘了改编号),'
+                          '自动提取公共前缀、把各分支用 || 合并成一条信号,而不是报错退出')
     args = ap.parse_args()
     if args.or_group:
         args.or_format = True
@@ -363,7 +411,7 @@ def main():
     if out == args.input:
         out = args.input + '.精简.txt'
 
-    preamble, lines, order = load(args.input)
+    preamble, lines, order = load(args.input, merge_dup=args.merge_dup)
     if not order:
         print('未找到任何 <前缀>_<数字> 形式的信号行,请检查输入文件格式。', file=sys.stderr)
         sys.exit(1)
